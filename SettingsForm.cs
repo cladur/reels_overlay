@@ -102,12 +102,18 @@ sealed class SettingsForm : Form
             TickStyle = TickStyle.None, AutoSize = false, Height = 28,
         };
         volumeValue = new Label { AutoSize = true, ForeColor = Text1, Margin = new Padding(4, 6, 0, 0) };
-        volume.ValueChanged += (_, _) => volumeValue.Text = $"{volume.Value}%";
         volumeValue.Text = $"{volume.Value}%";
         volRow.Controls.AddRange([volume, volumeValue]);
         Row(grid, "Volume", volRow);
         muted = Check("Muted", config.Muted);
         Row(grid, "", muted);
+        // Heard immediately; dropped again unless saved.
+        volume.ValueChanged += (_, _) =>
+        {
+            volumeValue.Text = $"{volume.Value}%";
+            overlay.PreviewSound(volume.Value / 100.0, muted.Checked);
+        };
+        muted.CheckedChanged += (_, _) => overlay.PreviewSound(volume.Value / 100.0, muted.Checked);
 
         // ---- display
         Header(grid, "Display");
@@ -134,7 +140,11 @@ sealed class SettingsForm : Form
         AcceptButton = null; // Enter must be recordable in a key box
         CancelButton = null;
 
-        FormClosed += (_, _) => overlay.ResumeHotkeys();
+        FormClosed += (_, _) =>
+        {
+            overlay.ResumeHotkeys();
+            overlay.EndSoundPreview(); // back to the saved volume and mute
+        };
     }
 
     // Nothing focused at first: a focused key box would already be recording.
@@ -198,7 +208,7 @@ sealed class SettingsForm : Form
         config.Save();
 
         var problems = overlay.ApplyInput();
-        overlay.SettingsChanged();
+        overlay.EndSoundPreview(); // the saved values are now the previewed ones
         if (gpuChanged)
         {
             Close();
@@ -208,7 +218,7 @@ sealed class SettingsForm : Form
         if (problems.Count > 0)
         {
             // Stay open so the user can pick other keys; the working ones are live meanwhile.
-            status.Text = "Saved, but not registered: " + string.Join(", ", problems) + ".";
+            status.Text = "Saved, but these could not be used: " + string.Join(", ", problems) + ".";
             return;
         }
         Close();

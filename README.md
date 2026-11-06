@@ -39,8 +39,9 @@ window, the overlay included.
 | `Alt+Shift+F1` | edit mode (move, resize, log in); press again to lock |
 
 All of these can be changed in Settings. Keys without Ctrl/Alt/Win also work while Shift is
-held, so they still fire while you sprint. While the app runs, Windows delivers these keys only
-to it, so other apps no longer receive them (F2 stops renaming files in Explorer, for example).
+held, so they still fire while you sprint. They work while a game has focus. While the app
+runs, it intercepts these keys, so the game and other apps no longer receive them (F2 stops
+renaming files in Explorer, for example).
 
 The tray icon's menu has Settings, edit mode, show/hide, reload and quit. Double-click the icon
 to open Settings.
@@ -54,13 +55,12 @@ Open Settings from the tray icon, or start the app with `reels_overlay.exe --set
   Windows' own combinations (Alt+F4, Alt+Tab) are refused.
 - **Mouse:** the modifiers to hold for wheel scrolling and middle-click liking. Ticking none
   turns mouse control off.
-- **Sound:** volume and mute.
+- **Sound:** volume and mute. You hear changes as you make them; Cancel puts them back.
 - **Display:** GPU rendering. It is off by default, because the overlay's GPU work while
   scrolling can cause FPS dips in GPU-bound games. Changing it restarts the app.
 
 Hotkeys keep working while the Settings window is open. They pause only while a key box is
-recording. Save applies immediately. If another app already owns a combination, the window says
-so and stays open so you can pick another.
+recording. Save applies immediately.
 
 Everything is stored in `%APPDATA%\reels_overlay`: `config.json` holds your settings and
 window position, and `WebView2` holds the Instagram login. Delete the folder to reset.
@@ -68,9 +68,9 @@ window position, and `WebView2` holds the Instagram login. Delete the folder to 
 ## Games and anti-cheat
 
 The overlay is a separate window. It injects nothing into games and reads no game memory. Its
-only system-wide input access is the global hotkeys and a low-level mouse hook, which watches
-for the modifier+wheel and modifier+middle-click combinations. Untick all mouse modifiers in
-Settings to remove the hook. As with any third-party tool, use it at your own risk.
+only system-wide input access is a low-level keyboard and mouse hook. The hook acts only on the
+app's own key and mouse combinations and passes everything else through untouched. As with any
+third-party tool, use it at your own risk.
 
 ## Building
 
@@ -114,9 +114,14 @@ Release exe: `dotnet publish -c Release -o publish` produces a single self-conta
   plays and about 55% of one core during swipes, measured on a 16-thread CPU.
 - The WebView2 browser processes run at below-normal priority, so the CPU work of loading
   reels yields to the game.
-- Windows holds every mouse event, including the game's, until a low-level hook returns. So the
-  mouse hook runs on its own high-priority thread that only reads the modifier keys and posts
-  any action to the UI thread without waiting.
+- Hotkeys come from a low-level keyboard hook (`WH_KEYBOARD_LL`), not `RegisterHotKey`. Games
+  read the keyboard through raw input, often with `RIDEV_NOHOTKEYS`, which stops Windows from
+  delivering registered hotkeys while the game has focus. A low-level hook sees the keys
+  earlier and is unaffected. A matched key is swallowed, along with its auto-repeats and its
+  release.
+- Windows holds every key and mouse event, including the game's, until the low-level hooks
+  return. So both hooks run on their own high-priority thread that only reads the modifier
+  keys and posts any action to the UI thread without waiting.
 
 ## Debugging
 

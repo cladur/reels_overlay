@@ -21,15 +21,14 @@ sealed class OverlayForm : Form
     readonly Label bar;
     readonly NotifyIcon tray;
     readonly System.Windows.Forms.Timer topmostTimer = new() { Interval = 2000 };
-    readonly Dictionary<int, Action> hotkeys = new();
     readonly List<string> inputProblems = new();
     ToolStripMenuItem editItem = null!, hideItem = null!;
     SettingsForm? settings;
 
-    bool ready, paused, hidden, editMode, hotkeysPaused;
+    bool ready, paused, hidden, editMode;
     IntPtr returnFocusTo;
 
-    MouseHook? mouseHook;
+    InputHook? input;
     int stepSerial;
 
     public OverlayForm(Config config)
@@ -107,62 +106,40 @@ sealed class OverlayForm : Form
         ApplyInput();
     }
 
-    // (Re)registers every hotkey and the mouse hook from the config. Returns what could not
-    // be registered; also used after the settings window saves.
+    // Hands the hook the hotkeys and mouse modifiers from the config. Returns what could not
+    // be used; also called after the settings window saves.
     public IReadOnlyList<string> ApplyInput()
     {
-        SuspendInput();
-        hotkeysPaused = false;
         inputProblems.Clear();
-        RegisterHotkeys();
-        InstallMouseHook();
+        // Callbacks run on the hook thread: BeginInvoke posts to the UI thread and returns at once.
+        input ??= new InputHook(dir => BeginInvoke(() => Step(dir)), () => BeginInvoke(ToggleLike));
+        if (!input.Installed) inputProblems.Add("keyboard/mouse hook (SetWindowsHookEx failed)");
+        input.Bindings = BuildBindings();
+        input.KeysEnabled = true;
+
+        var vks = Hotkeys.MouseModifierVks(config.WheelModifiers, out bool valid);
+        if (!valid) inputProblems.Add($"mouse modifiers \"{config.WheelModifiers}\" (unknown modifier)");
+        // No modifiers = mouse controls off: a bare wheel or middle button would be taken
+        // from every program, the game included.
+        input.MouseModifierVks = valid ? vks : [];
+        input.MouseEnabled = !hidden;
+
         bar.Text = $"drag to move · edges resize · {Key("EditMode")} locks";
         editItem.Text = MenuText("Edit mode", "EditMode");
         hideItem.Text = MenuText("Show / hide", "ShowHide");
         return inputProblems.ToList();
     }
 
-    // Releases every hotkey and the mouse hook.
-    void SuspendInput()
-    {
-        PauseHotkeys();
-        mouseHook?.Dispose();
-        mouseHook = null;
-    }
-
     // While a settings key box records, the keys must reach it instead of firing here.
-    // The mouse hook stays: it never sees keystrokes.
     public void PauseHotkeys()
     {
-        foreach (var id in hotkeys.Keys) UnregisterHotKey(Handle, id);
-        hotkeys.Clear();
-        hotkeysPaused = true;
+        if (input != null) input.KeysEnabled = false;
     }
 
     // Back to the saved keys (not whatever the settings window has unsaved).
     public void ResumeHotkeys()
     {
-        if (!hotkeysPaused) return;
-        hotkeysPaused = false;
-        inputProblems.Clear();
-        RegisterHotkeys();
-    }
-
-    void InstallMouseHook()
-    {
-        var vks = Hotkeys.MouseModifierVks(config.WheelModifiers, out bool valid);
-        if (!valid)
-        {
-            inputProblems.Add($"mouse modifiers \"{config.WheelModifiers}\" (unknown modifier)");
-            return;
-        }
-        // A bare wheel or middle button would be taken from every program, the game included.
-        if (vks.Length == 0) return;
-        // Callbacks run on the hook thread: BeginInvoke posts to the UI thread and returns at once.
-        mouseHook = new MouseHook(vks,
-            dir => BeginInvoke(() => Step(dir)),
-            () => BeginInvoke(ToggleLike)) { Enabled = !hidden };
-        if (!mouseHook.Installed) inputProblems.Add("mouse hook (SetWindowsHookEx failed)");
+        if (input != null) input.KeysEnabled = true;
     }
 
     protected override async void OnLoad(EventArgs e)
@@ -259,7 +236,7 @@ sealed class OverlayForm : Form
         var help = $"{Key("PlayPause")} pause · {Key("Next")}/{Key("Previous")} next/prev · " +
                    $"{Key("Mute")} mute · {Key("VolumeDown")}/{Key("VolumeUp")} volume · " +
                    $"{Key("ShowHide")} hide · {Key("EditMode")} edit mode" +
-                   (mouseHook?.Installed == true
+                   (input?.MouseModifierVks.Length > 0
                        ? $" · {config.WheelModifiers}+wheel scroll · {config.WheelModifiers}+middle-click like"
                        : "");
         if (config.FirstRun)
@@ -278,7 +255,8 @@ sealed class OverlayForm : Form
     {
         topmostTimer.Stop();
         settings?.Close();
-        SuspendInput();
+        input?.Dispose();
+        input = null;
         if (editMode) SaveBounds();
         config.Save();
         tray.Visible = false;
@@ -290,9 +268,6 @@ sealed class OverlayForm : Form
     {
         switch (m.Msg)
         {
-            case WM_HOTKEY:
-                if (hotkeys.TryGetValue((int)m.WParam, out var action)) action();
-                return;
             case WM_MOUSEACTIVATE when !editMode:
                 m.Result = MA_NOACTIVATE;
                 return;
@@ -443,7 +418,7 @@ sealed class OverlayForm : Form
     {
         if (editMode) SetEditMode(false);
         hidden = !hidden;
-        if (mouseHook != null) mouseHook.Enabled = !hidden;
+        if (input != null) input.MouseEnabled = !hidden;
         if (hidden)
         {
             Push(); // pause before hiding
@@ -531,8 +506,8 @@ sealed class OverlayForm : Form
         var state = new
         {
             paused = paused || hidden,
-            muted = config.Muted,
-            volume = config.Volume,
+            muted = previewMuted ?? config.Muted,
+            volume = previewVolume ?? config.Volume,
             interactive = editMode,
         };
         _ = web.CoreWebView2.ExecuteScriptAsync(
@@ -541,7 +516,7 @@ sealed class OverlayForm : Form
 
     // ---- hotkeys & tray ------------------------------------------------------------------
 
-    void RegisterHotkeys()
+    InputHook.Binding[] BuildBindings()
     {
         var actions = new Dictionary<string, Action>
         {
@@ -557,10 +532,7 @@ sealed class OverlayForm : Form
         foreach (var name in config.Keys.Keys.Where(k => !actions.ContainsKey(k)))
             inputProblems.Add($"unknown action \"{name}\"");
 
-        // Explicit combinations first, so a bare key's Shift variant (below) never takes a
-        // combination that another action asked for.
-        var bare = new List<(Keys Key, Action Action)>();
-        int id = 1;
+        var bindings = new List<InputHook.Binding>();
         foreach (var (name, _) in Hotkeys.Actions)
         {
             var action = actions[name];
@@ -571,20 +543,10 @@ sealed class OverlayForm : Form
                 inputProblems.Add($"{Label(name)} \"{text}\" (unknown key)");
                 continue;
             }
-            if (!RegisterHotKey(Handle, id, mods | MOD_NOREPEAT, (uint)key))
-            {
-                inputProblems.Add($"{Label(name)} {text} (used by another app)");
-                continue;
-            }
-            hotkeys[id++] = action;
-            if (mods == 0) bare.Add((key, action));
+            // Fire runs on the hook thread; the action itself runs on the UI thread.
+            bindings.Add(new InputHook.Binding(mods, (int)key, () => BeginInvoke(action)));
         }
-
-        // Windows matches modifiers exactly, so a bare F1 would not fire mid-sprint.
-        // Best effort: if another app owns the Shift variant it is simply skipped.
-        foreach (var (key, action) in bare)
-            if (RegisterHotKey(Handle, id, MOD_SHIFT | MOD_NOREPEAT, (uint)key))
-                hotkeys[id++] = action;
+        return bindings.ToArray();
     }
 
     static string Label(string action) =>
@@ -628,9 +590,25 @@ sealed class OverlayForm : Form
         settings.Activate();
     }
 
-    // Settings saved: the page gets the new volume and mute, input is re-registered by the
-    // caller. A changed GpuRendering only takes effect in a new browser process.
-    public void SettingsChanged() => Push($"Volume {Percent(config.Volume)}" + (config.Muted ? " (muted)" : ""));
+    // The settings window's volume and mute, heard while it is open but not saved yet.
+    double? previewVolume;
+    bool? previewMuted;
+
+    public void PreviewSound(double volume, bool muted)
+    {
+        previewVolume = volume;
+        previewMuted = muted;
+        Push(muted ? "Muted" : $"Volume {Percent(volume)}");
+    }
+
+    // Back to the saved volume and mute (after Save they are the same values).
+    public void EndSoundPreview()
+    {
+        if (previewVolume is null && previewMuted is null) return;
+        previewVolume = null;
+        previewMuted = null;
+        Push();
+    }
 
     public void Restart()
     {

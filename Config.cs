@@ -29,8 +29,8 @@ sealed class Config
 
     // Hotkey strings: optional modifiers (Ctrl, Alt, Shift, Win) joined by '+' with a
     // System.Windows.Forms.Keys name, e.g. "F2", "Ctrl+Alt+F1", "Alt+PageDown".
-    // An empty string disables that action. Registered hotkeys are consumed by Windows,
-    // so neither the game nor any other app sees them while Reels Overlay runs.
+    // An empty string disables that action. The keyboard hook swallows a matched key, so
+    // neither the game nor any other app sees it while Reels Overlay runs.
     // A key without modifiers also fires while Shift is held (sprinting), so Shift+key is
     // taken too. Defaults avoid Ctrl, which is prone in Siege.
     public Dictionary<string, string> Keys { get; set; } = new()

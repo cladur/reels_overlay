@@ -11,7 +11,7 @@
     <ApplicationIcon>app.ico</ApplicationIcon>
     <AssemblyName>reels_overlay</AssemblyName>
     <RootNamespace>ReelsOverlay</RootNamespace>
-    <Version>1.0.0</Version>
+    <Version>1.0.1</Version>
     <Product>Reels Overlay</Product>
   </PropertyGroup>
 
